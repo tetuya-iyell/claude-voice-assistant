@@ -14,6 +14,13 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    // コンテナイメージURIのパラメータを定義
+    const containerImageParam = new cdk.CfnParameter(this, 'ContainerImage', {
+      type: 'String',
+      description: 'The URI of the container image to deploy',
+      default: `${this.account}.dkr.ecr.${this.region}.amazonaws.com/claude-voice-assistant:latest`
+    });
+
     // VPC作成
     const vpc = new ec2.Vpc(this, 'ClaudeVoiceAssistantVPC', {
       maxAzs: 2,
@@ -111,23 +118,9 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
     // タスクロールにTranscribeポリシーを追加
     taskDefinition.taskRole.addToPrincipalPolicy(transcribePolicy);
 
-    // コンテナイメージをローカルのDockerfileからビルドするための設定
-    const containerImage = ecs.ContainerImage.fromAsset(path.join(__dirname, '../../app'), {
-      // 小さなイメージサイズと互換性の高い設定
-      platform: cdk.aws_ecr_assets.Platform.LINUX_AMD64,
-      buildArgs: {
-        NODE_ENV: 'production',
-      },
-      // ビルドキャッシュを無効化
-      invalidation: {
-        buildArgs: true,
-      },
-    });
-
-    // コンテナ定義
+    // コンテナ定義 - パラメータからイメージURIを使用
     const container = taskDefinition.addContainer('ClaudeVoiceAssistantContainer', {
-      // イメージをリポジトリから参照するのではなく、ローカルからビルド
-      image: containerImage,
+      image: ecs.ContainerImage.fromRegistry(containerImageParam.valueAsString),
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'claude-voice-assistant',
         logGroup,
