@@ -48,12 +48,48 @@ Claude APIを使用した音声会話アプリケーションです。このア�
    $env:CDK_DEPLOY_REGION = "us-east-1"
    ```
 
-3. **CDKコマンド実行時に指定**:
-   ```bash
-   cdk deploy --context aws:region=us-east-1
-   ```
+### デプロイスクリプトの使用 (推奨)
 
-### 1. CDKプロジェクトのセットアップとデプロイ
+プロジェクトに含まれるデプロイスクリプトを使用すると、ECRログインから始まる一連のデプロイ手順を自動的に実行できます。
+
+#### macOS/Linux:
+
+```bash
+# CDKディレクトリに移動
+cd cdk
+
+# スクリプトに実行権限を付与
+chmod +x deploy.sh
+
+# デプロイを実行
+./deploy.sh
+```
+
+#### Windows:
+
+```bash
+# CDKディレクトリに移動
+cd cdk
+
+# デプロイを実行
+deploy.bat
+```
+
+### 手動でのデプロイ手順
+
+デプロイスクリプトを使用せず、手動でデプロイする場合は以下の手順を実行します：
+
+1. **ECRへのログイン**
+
+```bash
+# アカウントIDを取得
+ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+
+# ECRにログイン
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com
+```
+
+2. **CDKプロジェクトのセットアップとデプロイ**
 
 ```bash
 # CDKディレクトリに移動
@@ -63,19 +99,23 @@ cd cdk
 npm install
 
 # AWS環境の初期化（初回のみ）
-cdk bootstrap aws://ACCOUNT-NUMBER/us-east-1
+cdk bootstrap aws://${ACCOUNT_ID}/us-east-1
 
 # デプロイ内容の確認
 cdk diff
 
 # CDKスタックのデプロイ
 cdk deploy
-
-# 出力情報を確認
-# 重要: ECRリポジトリURI、ロードバランサーDNS、S3バケット名をメモしておく
 ```
 
-### 2. APIキーの設定
+3. **デプロイの確認**
+
+```bash
+# ロードバランサーDNSを取得
+aws cloudformation describe-stacks --stack-name ClaudeVoiceAssistantStack --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDns'].OutputValue" --output text --region us-east-1
+```
+
+### APIキーの設定
 
 AWS Management Consoleで、または以下のAWS CLIコマンドを使用して、AWS Secrets Managerにシークレットを設定します：
 
@@ -85,39 +125,11 @@ aws secretsmanager update-secret \
   --secret-string '{
     "ANTHROPIC_API_KEY": "sk-ant-your-anthropic-api-key",
     "GOOGLE_APPLICATION_CREDENTIALS_JSON": "{\"type\":\"service_account\",\"project_id\":\"your-project-id\",\"private_key\":\"your-private-key\",\"client_email\":\"your-service-account@your-project.iam.gserviceaccount.com\"}"
-  }'
-```
-
-### 3. アプリケーションのビルドとデプロイ
-
-```bash
-# appディレクトリに移動
-cd app
-
-# Dockerイメージのビルド
-docker build -t claude-voice-assistant .
-
-# AWSにログイン (us-east-1リージョンを指定)
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}
-
-# イメージにタグ付け
-docker tag claude-voice-assistant:latest ${ECR_REPOSITORY_URI}:latest
-
-# ECRにプッシュ
-docker push ${ECR_REPOSITORY_URI}:latest
-```
-
-以下のコマンドでECSサービスを更新し、新しいイメージをデプロイします：
-
-```bash
-aws ecs update-service \
-  --cluster claude-voice-assistant-cluster \
-  --service claude-voice-assistant-service \
-  --force-new-deployment \
+  }' \
   --region us-east-1
 ```
 
-### 4. アプリケーションへのアクセス
+### アプリケーションへのアクセス
 
 デプロイが完了すると、CDKの出力に表示されたロードバランサーのDNS名を使用してアプリケーションにアクセスできます：
 
@@ -229,6 +241,14 @@ cdk destroy --region us-east-1
   - すべてのリソースが同じリージョン（us-east-1）にあることを確認
   - AWS CLIやSDKの操作時にリージョンを明示的に指定
   - CDKデプロイがus-east-1に対して行われたことを確認
+
+### ECRプッシュの問題
+
+- **ECRへのプッシュに失敗する場合**:
+  - 提供されているデプロイスクリプトを使用して、ECRへのログインを確実に行う
+  - Dockerが実行中であることを確認
+  - AWS認証情報が正しく設定されていることを確認
+  - デプロイスクリプト実行時のエラーメッセージを確認
 
 ### その他の一般的な問題については、[app/README.md](app/README.md)を参照してください。
 
