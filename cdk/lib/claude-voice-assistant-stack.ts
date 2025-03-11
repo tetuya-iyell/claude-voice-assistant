@@ -62,13 +62,28 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       ],
     });
 
+    // タスク実行ロールの作成
+    const executionRole = new iam.Role(this, 'TaskExecutionRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy')
+      ]
+    });
+
+    // タスクロールの作成
+    const taskRole = new iam.Role(this, 'TaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com')
+    });
+
     // タスク定義
     const taskDefinition = new ecs.FargateTaskDefinition(this, 'ClaudeVoiceAssistantTask', {
       memoryLimitMiB: 2048,
       cpu: 1024,
+      executionRole: executionRole,
+      taskRole: taskRole
     });
 
-    // S3アクセス権限をタスク実行ロールに付与
+    // S3アクセス権限をタスクロールに付与
     tempFilesBucket.grantReadWrite(taskDefinition.taskRole);
 
     // CloudWatch Logs グループ
@@ -79,7 +94,7 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
     });
 
     // シークレットマネージャーへのアクセス権をタスク実行ロールに付与
-    appSecrets.grantRead(taskDefinition.executionRole!);
+    appSecrets.grantRead(executionRole);
 
     // Transcribeサービス用のポリシーを追加
     const transcribePolicy = new iam.PolicyStatement({
@@ -92,7 +107,7 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       resources: ['*'],  // Transcribeは特定のARNターゲットをサポートしていないため、*を使用
     });
 
-    // タスク実行ロールにTranscribeポリシーを追加
+    // タスクロールにTranscribeポリシーを追加
     taskDefinition.taskRole.addToPrincipalPolicy(transcribePolicy);
 
     // コンテナ定義
