@@ -100,15 +100,22 @@ app.get('/health', (req, res) => {
 
 // S3にファイルをアップロードする関数
 async function uploadToS3(fileBuffer, contentType, key) {
-  const command = new PutObjectCommand({
-    Bucket: BUCKET_NAME,
-    Key: key,
-    Body: fileBuffer,
-    ContentType: contentType,
-  });
+  try {
+    console.log(`Uploading to S3. Bucket: ${BUCKET_NAME}, Key: ${key}`);
+    const command = new PutObjectCommand({
+      Bucket: BUCKET_NAME,
+      Key: key,
+      Body: fileBuffer,
+      ContentType: contentType,
+    });
 
-  await s3.send(command);
-  return key;
+    await s3.send(command);
+    console.log(`Upload successful: ${key}`);
+    return key;
+  } catch (error) {
+    console.error('Error uploading to S3:', error);
+    throw error;
+  }
 }
 
 // S3からファイルをダウンロードする関数
@@ -156,6 +163,8 @@ async function getTranscriptionResult(transcriptFileUri) {
     const bucket = url.hostname.split('.')[0];
     const key = url.pathname.substring(1); // 先頭の/を削除
     
+    console.log(`Getting transcription result. Bucket: ${bucket}, Key: ${key}`);
+    
     // S3からJSONファイルを取得
     const command = new GetObjectCommand({
       Bucket: bucket,
@@ -191,23 +200,44 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
       return res.status(400).json({ error: 'No audio file provided' });
     }
 
+    console.log(`Processing audio file: ${req.file.path}, size: ${req.file.size} bytes`);
+
     // 一意のジョブ名を生成
     const jobName = `transcribe-job-${Date.now()}-${uuidv4().substring(0, 8)}`;
     let s3Key;
 
     if (useS3) {
+      // ファイル拡張子を確認（.wav ファイルが必要）
+      const fileExt = path.extname(req.file.path).toLowerCase();
+      if (fileExt !== '.wav' && fileExt !== '.mp3') {
+        return res.status(400).json({ error: 'Audio file must be .wav or .mp3 format' });
+      }
+
       // ファイルをS3にアップロード
-      s3Key = `uploads/audio-${Date.now()}.wav`;
-      await uploadToS3(fs.readFileSync(req.file.path), 'audio/wav', s3Key);
+      s3Key = `uploads/audio-${Date.now()}${fileExt}`;
+      console.log(`Reading file from ${req.file.path} for upload to S3`);
+      const fileBuffer = fs.readFileSync(req.file.path);
+      
+      await uploadToS3(
+        fileBuffer, 
+        fileExt === '.wav' ? 'audio/wav' : 'audio/mp3', 
+        s3Key
+      );
       
       // S3 URLを作成
       const s3Uri = `s3://${BUCKET_NAME}/${s3Key}`;
+      console.log(`S3 URI for transcription: ${s3Uri}`);
+      
+      // ファイル形式を取得
+      const mediaFormat = fileExt.substring(1); // .wavから先頭の.を削除
+
+      console.log(`Starting transcription job: ${jobName}, format: ${mediaFormat}`);
       
       // Transcribeジョブを開始
       const startCommand = new StartTranscriptionJobCommand({
         TranscriptionJobName: jobName,
         LanguageCode: 'ja-JP', // 日本語を指定
-        MediaFormat: path.extname(req.file.path).substring(1) || 'wav', // ファイル拡張子から形式を取得
+        MediaFormat: mediaFormat,
         Media: {
           MediaFileUri: s3Uri,
         },
@@ -215,30 +245,59 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
         OutputKey: `transcripts/${jobName}.json`,
       });
       
+      console.log('Sending transcription job command');
       await transcribeClient.send(startCommand);
+      console.log('Transcription job started');
       
       // ジョブが完了するまで待機
       let job;
       let status;
+      let attempts = 0;
+      const maxAttempts = 30; // 最大30回試行（約30秒）
+      
       do {
-        job = await checkTranscriptionJobStatus(jobName);
-        status = job.TranscriptionJobStatus;
+        attempts++;
+        console.log(`Checking job status, attempt ${attempts}/${maxAttempts}`);
         
-        if (status === 'FAILED') {
-          throw new Error(`Transcription job failed: ${job.FailureReason}`);
-        }
-        
-        if (status !== 'COMPLETED') {
-          // 1秒待機してから再確認
+        try {
+          job = await checkTranscriptionJobStatus(jobName);
+          status = job.TranscriptionJobStatus;
+          
+          console.log(`Transcription job status: ${status}`);
+          
+          if (status === 'FAILED') {
+            console.error(`Transcription job failed: ${job.FailureReason}`);
+            throw new Error(`Transcription job failed: ${job.FailureReason}`);
+          }
+          
+          if (status !== 'COMPLETED') {
+            // 1秒待機してから再確認
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        } catch (statusError) {
+          console.error('Error checking job status:', statusError);
+          if (attempts >= maxAttempts) {
+            throw new Error('Transcription timeout: Job status check failed too many times');
+          }
+          // エラーが発生しても続行（一時的なネットワークエラーなどの可能性）
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
-      } while (status !== 'COMPLETED');
+      } while (status !== 'COMPLETED' && attempts < maxAttempts);
+      
+      if (status !== 'COMPLETED') {
+        throw new Error('Transcription timeout: Job did not complete in the allowed time');
+      }
+      
+      console.log('Transcription job completed successfully');
       
       // トランスクリプション結果を取得
+      console.log(`Getting result from ${job.Transcript.TranscriptFileUri}`);
       const transcriptionText = await getTranscriptionResult(job.Transcript.TranscriptFileUri);
+      console.log(`Transcription result: ${transcriptionText}`);
       
       // ローカルの一時ファイルを削除
       fs.unlinkSync(req.file.path);
+      console.log(`Deleted temporary file: ${req.file.path}`);
       
       res.json({ text: transcriptionText });
     } else {
@@ -252,6 +311,7 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     // ファイルのクリーンアップを試みる
     if (req.file && req.file.path && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
+      console.log(`Deleted temporary file after error: ${req.file.path}`);
     }
     res.status(500).json({ error: 'Failed to transcribe audio: ' + error.message });
   }
@@ -407,4 +467,7 @@ if (!fs.existsSync(uploadsDir)) {
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Using S3 for storage: ${useS3 ? 'Yes' : 'No'}`);
+  if (useS3) {
+    console.log(`S3 Bucket: ${BUCKET_NAME}, Region: ${AWS_REGION}`);
+  }
 });
