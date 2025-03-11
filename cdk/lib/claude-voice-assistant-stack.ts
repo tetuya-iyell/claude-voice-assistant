@@ -182,41 +182,42 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       securityGroup: securityGroup,
     });
 
-    // ACM証明書の作成
+    // ACM証明書の作成 - ドメイン名が指定されている場合のみ
     let certificate;
     const domainName = domainNameParam.valueAsString;
     
+    // HTTPリスナー
+    const httpListener = lb.addListener('HttpListener', {
+      port: 80,
+      open: true,
+    });
+    
+    // HTTPSリスナーとターゲット
+    let httpsListener;
+    
     if (domainName && domainName !== '') {
-      // カスタムドメインが指定されている場合はそのドメインで証明書を作成
+      // カスタムドメインが指定されている場合は証明書を作成
       certificate = new acm.Certificate(this, 'Certificate', {
         domainName: domainName,
         validation: acm.CertificateValidation.fromDns(),
       });
-    } else {
-      // ドメインが指定されていない場合はロードバランサーのDNS名で自己署名証明書を作成
-      certificate = new acm.Certificate(this, 'SelfSignedCertificate', {
-        domainName: `${lb.loadBalancerDnsName}`,
-        validation: acm.CertificateValidation.fromDns(),
+      
+      // HTTPSリスナーを追加
+      httpsListener = lb.addListener('HttpsListener', {
+        port: 443,
+        certificates: [certificate],
+        open: true,
+      });
+      
+      // HTTPからHTTPSへリダイレクト
+      httpListener.addAction('HttpToHttps', {
+        action: elbv2.ListenerAction.redirect({
+          port: '443',
+          protocol: elbv2.ApplicationProtocol.HTTPS,
+          permanent: true,
+        }),
       });
     }
-
-    // HTTPリスナー - HTTPSへリダイレクト
-    const httpListener = lb.addListener('HttpListener', {
-      port: 80,
-      open: true,
-      defaultAction: elbv2.ListenerAction.redirect({
-        port: '443',
-        protocol: elbv2.ApplicationProtocol.HTTPS,
-        permanent: true,
-      }),
-    });
-
-    // HTTPSリスナー
-    const httpsListener = lb.addListener('HttpsListener', {
-      port: 443,
-      certificates: [certificate],
-      open: true,
-    });
 
     // ECSサービス
     const service = new ecs.FargateService(this, 'ClaudeVoiceAssistantService', {
@@ -228,18 +229,34 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       healthCheckGracePeriod: cdk.Duration.seconds(180), // ヘルスチェックの猶予期間を長く設定
     });
 
-    // HTTPSリスナーにターゲットを追加
-    httpsListener.addTargets('ClaudeVoiceAssistantTarget', {
-      port: 3000,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      targets: [service],
-      healthCheck: {
-        path: '/health',
-        interval: cdk.Duration.seconds(30),
-        timeout: cdk.Duration.seconds(5),
-        healthyHttpCodes: '200',
-      },
-    });
+    // リスナーにターゲットを追加
+    if (httpsListener) {
+      // HTTPSリスナーが存在する場合はそこにターゲットを追加
+      httpsListener.addTargets('ClaudeVoiceAssistantTarget', {
+        port: 3000,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        targets: [service],
+        healthCheck: {
+          path: '/health',
+          interval: cdk.Duration.seconds(30),
+          timeout: cdk.Duration.seconds(5),
+          healthyHttpCodes: '200',
+        },
+      });
+    } else {
+      // HTTPSリスナーがない場合はHTTPリスナーにターゲットを追加
+      httpListener.addTargets('ClaudeVoiceAssistantTarget', {
+        port: 3000,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        targets: [service],
+        healthCheck: {
+          path: '/health',
+          interval: cdk.Duration.seconds(30),
+          timeout: cdk.Duration.seconds(5),
+          healthyHttpCodes: '200',
+        },
+      });
+    }
 
     // Auto Scaling設定
     const scalableTarget = service.autoScaleTaskCount({
@@ -259,10 +276,17 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       description: 'The DNS name of the load balancer',
     });
 
-    new cdk.CfnOutput(this, 'LoadBalancerUrl', {
-      value: `https://${lb.loadBalancerDnsName}`,
-      description: 'The URL of the application (HTTPS)',
-    });
+    if (domainName && domainName !== '') {
+      new cdk.CfnOutput(this, 'HttpsUrl', {
+        value: `https://${domainName}`,
+        description: 'The HTTPS URL of the application',
+      });
+    } else {
+      new cdk.CfnOutput(this, 'HttpUrl', {
+        value: `http://${lb.loadBalancerDnsName}`,
+        description: 'The HTTP URL of the application',
+      });
+    }
 
     new cdk.CfnOutput(this, 'EcrRepositoryUri', {
       value: repository.repositoryUri,
@@ -273,12 +297,5 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       value: tempFilesBucket.bucketName,
       description: 'The name of the S3 bucket for temp files',
     });
-
-    if (domainName && domainName !== '') {
-      new cdk.CfnOutput(this, 'CustomDomainUrl', {
-        value: `https://${domainName}`,
-        description: 'The custom domain URL of the application',
-      });
-    }
   }
 }
