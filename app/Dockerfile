@@ -2,12 +2,15 @@ FROM node:18-slim
 
 WORKDIR /usr/src/app
 
-# Install dependencies required for audio processing
+# Install dependencies required for audio processing and AWS CLI
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
     python3 \
     python3-pip \
+    python3-setuptools \
+    python3-wheel \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Install AWS CLI for S3 access
