@@ -1,21 +1,15 @@
-FROM node:18-slim
+FROM node:18-alpine
 
 WORKDIR /usr/src/app
 
-# Install dependencies required for audio processing and node-gyp
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    curl \
-    python3 \
-    make \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
+# Install ffmpeg and curl in Alpine
+RUN apk add --no-cache ffmpeg curl
 
-# Copy package files
+# Copy package files first for better layer caching
 COPY package*.json ./
 
-# Install dependencies with more verbose output and without audit
-RUN npm install --no-audit --verbose
+# Install dependencies
+RUN npm install --production
 
 # Copy application code
 COPY . .
