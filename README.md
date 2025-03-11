@@ -10,7 +10,7 @@ Claude APIを使用した音声会話アプリケーションです。このア�
 ## 主な機能
 
 - ブラウザベースの音声インターフェース
-- リアルタイム音声認識 (OpenAI Whisper API)
+- リアルタイム音声認識 (AWS Transcribe)
 - 高度な自然言語処理 (Claude API)
 - 音声合成による回答 (Google Text-to-Speech)
 - AWS環境へのデプロイ (CDK)
@@ -55,7 +55,6 @@ aws secretsmanager update-secret \
   --secret-id "claude-voice-assistant-secrets" \
   --secret-string '{
     "ANTHROPIC_API_KEY": "sk-ant-your-anthropic-api-key",
-    "OPENAI_API_KEY": "sk-your-openai-api-key",
     "GOOGLE_APPLICATION_CREDENTIALS_JSON": "{\"type\":\"service_account\",\"project_id\":\"your-project-id\",\"private_key\":\"your-private-key\",\"client_email\":\"your-service-account@your-project.iam.gserviceaccount.com\"}"
   }'
 ```
@@ -96,6 +95,38 @@ aws ecs update-service \
 http://${LOAD_BALANCER_DNS}
 ```
 
+## AWS Transcribeについて
+
+このアプリケーションは音声認識にAWS Transcribeを使用します。AWS Transcribeを使用するには、次の要件があります：
+
+1. **S3バケットが必須**: AWS Transcribeは音声ファイルをS3から読み取り、結果もS3に保存します。そのため、`S3_BUCKET_NAME` 環境変数の設定が必須となります。
+
+2. **必要なIAM権限**:
+   - `transcribe:StartTranscriptionJob`
+   - `transcribe:GetTranscriptionJob`
+   - `transcribe:ListTranscriptionJobs`
+   - S3バケットへの読み書きアクセス権限
+
+3. **サポートされる音声形式**:
+   - WAV, MP3, MP4, FLAC, AMR, OGG, WebM など
+
+4. **処理時間**:
+   - 短い音声ファイルの場合でも数秒の処理時間が必要です
+   - アプリケーションはジョブが完了するまで待機します
+
+## Google Text-to-Speechについて
+
+音声合成にはGoogle Cloud Text-to-Speech APIを使用しています。設定には以下が必要です：
+
+1. **必要なサービスアカウント権限**:
+   - **Cloud Text-to-Speech API User** (`roles/cloudtexttospeech.user`)
+
+2. **サービスアカウントの設定手順**:
+   - Google Cloud Consoleでプロジェクトを作成
+   - Cloud Text-to-Speech APIを有効化
+   - サービスアカウントを作成し、適切な権限を付与
+   - JSONキーをダウンロードし、内容をエスケープして環境変数に設定
+
 ## ローカル開発
 
 ローカル環境で開発とテストを行う場合は以下の手順を実行します：
@@ -108,9 +139,8 @@ cd app
 npm install
 
 # .envファイルを作成し、必要なAPIキーを設定
-echo "ANTHROPIC_API_KEY=sk-ant-your-key
-OPENAI_API_KEY=sk-your-key
-GOOGLE_APPLICATION_CREDENTIALS_JSON={\"type\":\"service_account\",...}" > .env
+cp .env.example .env
+# .envファイルを編集して必要な情報を追加
 
 # アプリケーションの起動
 npm run dev
@@ -137,20 +167,6 @@ aws logs get-log-events \
     --output text)
 ```
 
-### スケーリング設定
-
-負荷に応じたスケーリングは自動的に設定されていますが、以下のコマンドで手動調整も可能です：
-
-```bash
-# タスク数の調整
-aws application-autoscaling register-scalable-target \
-  --service-namespace ecs \
-  --resource-id service/claude-voice-assistant-cluster/claude-voice-assistant-service \
-  --scalable-dimension ecs:service:DesiredCount \
-  --min-capacity 2 \
-  --max-capacity 10
-```
-
 ### リソースのクリーンアップ
 
 環境を削除する場合は以下のコマンドを実行します：
@@ -162,12 +178,23 @@ cdk destroy
 
 ## トラブルシューティング
 
-一般的な問題と解決策については、[app/README.md](app/README.md)を参照してください。
+### AWS Transcribe関連の問題
+
+- **ジョブが失敗する場合**:
+  - S3バケットへのアクセス権限を確認
+  - ファイル形式がサポートされているか確認
+  - IAM権限が適切に設定されているか確認
+
+- **処理が遅い場合**:
+  - AWS Transcribeは非同期処理のため、短い音声でも数秒の処理時間が必要です
+  - 長い音声ファイルの場合はさらに時間がかかります
+
+### その他の一般的な問題については、[app/README.md](app/README.md)を参照してください。
 
 ## 技術スタック
 
 - **フロントエンド**: HTML, CSS, JavaScript
 - **バックエンド**: Node.js, Express
-- **AI/機械学習**: Claude API, OpenAI Whisper API, Google Text-to-Speech
-- **インフラ**: AWS CDK, ECS Fargate, ECR, ALB, S3, Secrets Manager
+- **AI/機械学習**: Claude API, AWS Transcribe, Google Text-to-Speech
+- **インフラ**: AWS CDK, ECS Fargate, ECR, ALB, S3, Secrets Manager, Transcribe
 - **CI/CD**: AWS CLI, Docker
