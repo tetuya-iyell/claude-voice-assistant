@@ -1,25 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { Anthropic } = require('@anthropic-ai/sdk');
 const { 
   S3Client, 
   PutObjectCommand, 
-  GetObjectCommand, 
   DeleteObjectCommand,
-  ListBucketsCommand
 } = require('@aws-sdk/client-s3');
-const { 
-  TranscribeClient, 
-  StartTranscriptionJobCommand, 
-  GetTranscriptionJobCommand 
-} = require('@aws-sdk/client-transcribe');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { v4: uuidv4 } = require('uuid');
-const axios = require('axios').default;
 
 // Google Cloud クライアントを条件付きで読み込む
 let textToSpeech;
@@ -58,44 +49,12 @@ app.use((req, res, next) => {
 // S3クライアントの初期化
 const s3 = new S3Client({
   region: AWS_REGION,
-  maxAttempts: 5, // 再試行回数を増やす
-});
-
-// Transcribeクライアントの初期化
-const transcribeClient = new TranscribeClient({
-  region: AWS_REGION,
-  maxAttempts: 5, // 再試行回数を増やす
-});
-
-// Axiosにタイムアウト設定
-const axiosInstance = axios.create({
-  timeout: TIMEOUT_MS,
 });
 
 const BUCKET_NAME = process.env.S3_BUCKET_NAME;
 
 // ローカルストレージかS3かを判定するフラグ
 const useS3 = !!process.env.S3_BUCKET_NAME;
-
-// 一時ファイル保存用のストレージ設定
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = './uploads';
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `audio-${Date.now()}${path.extname(file.originalname)}`);
-  }
-});
-
-// ファイルサイズ制限の設定 (50MB)
-const upload = multer({ 
-  storage,
-  limits: { fileSize: 50 * 1024 * 1024 } 
-});
 
 // クライアントの初期化
 const anthropic = new Anthropic({
@@ -142,294 +101,6 @@ async function uploadToS3(fileBuffer, contentType, key) {
   }
 }
 
-// S3からファイルをダウンロードする関数
-async function getFileFromS3(key) {
-  const command = new GetObjectCommand({
-    Bucket: BUCKET_NAME,
-    Key: key,
-  });
-
-  const response = await s3.send(command);
-  return response.Body;
-}
-
-// S3からファイルを取得してBufferに変換する関数
-async function getBufferFromS3(key) {
-  const fileStream = await getFileFromS3(key);
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    fileStream.on('data', (chunk) => chunks.push(chunk));
-    fileStream.on('error', reject);
-    fileStream.on('end', () => resolve(Buffer.concat(chunks)));
-  });
-}
-
-// AWS Transcribeジョブのステータスを確認する関数
-async function checkTranscriptionJobStatus(jobName) {
-  const command = new GetTranscriptionJobCommand({
-    TranscriptionJobName: jobName,
-  });
-
-  try {
-    const response = await transcribeClient.send(command);
-    return response.TranscriptionJob;
-  } catch (error) {
-    console.error('Error checking transcription job status:', error);
-    throw error;
-  }
-}
-
-// HTTPSでJSONをダウンロードする関数
-async function downloadJson(url) {
-  try {
-    console.log(`Downloading JSON from: ${url}`);
-    const response = await axiosInstance.get(url);
-    return response.data;
-  } catch (error) {
-    console.error(`Error downloading JSON: ${error.message}`);
-    throw new Error(`Failed to download JSON: ${error.message}`);
-  }
-}
-
-// S3バケットの存在確認とアクセスチェック
-async function checkS3Bucket() {
-  try {
-    console.log(`Checking S3 bucket access for: ${BUCKET_NAME}`);
-    const listCommand = new ListBucketsCommand({});
-    const { Buckets } = await s3.send(listCommand);
-    
-    const bucketExists = Buckets.some(bucket => bucket.Name === BUCKET_NAME);
-    if (!bucketExists) {
-      console.error(`Bucket ${BUCKET_NAME} does not exist or you don't have permission to list buckets`);
-      return false;
-    }
-    
-    // バケットが存在する場合はアクセスチェック
-    try {
-      const testKey = `test-${Date.now()}.txt`;
-      await uploadToS3(Buffer.from('test'), 'text/plain', testKey);
-      console.log(`Successfully wrote to bucket ${BUCKET_NAME}`);
-      
-      // テストファイルを削除
-      const deleteCommand = new DeleteObjectCommand({
-        Bucket: BUCKET_NAME,
-        Key: testKey,
-      });
-      await s3.send(deleteCommand);
-      return true;
-    } catch (error) {
-      console.error(`Cannot write to bucket ${BUCKET_NAME}: ${error.message}`);
-      return false;
-    }
-  } catch (error) {
-    console.error(`Error checking S3 bucket: ${error.message}`);
-    return false;
-  }
-}
-
-// 音声認識エンドポイント
-app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
-  // タイムアウトを避けるためにタイムアウト時間を設定
-  req.setTimeout(TIMEOUT_MS);
-  res.setTimeout(TIMEOUT_MS);
-  
-  let cleanup = null;
-  
-  try {
-    // 音声ファイルが存在しない場合はエラー
-    if (!req.file) {
-      return res.status(400).json({ error: 'No audio file provided' });
-    }
-
-    console.log(`Processing audio file: ${req.file.path}, size: ${req.file.size} bytes`);
-
-    if (!useS3) {
-      // S3が使用できない場合はサポートされていないことを通知
-      return res.status(501).json({ 
-        error: 'AWS Transcribe requires S3 bucket. Please set S3_BUCKET_NAME environment variable.' 
-      });
-    }
-
-    // 先にクリーンアップ関数を設定
-    cleanup = () => {
-      try {
-        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-          fs.unlinkSync(req.file.path);
-          console.log(`Deleted temporary file: ${req.file.path}`);
-        }
-      } catch (err) {
-        console.error(`Error during cleanup: ${err.message}`);
-      }
-    };
-
-    // S3バケットのアクセス確認
-    const bucketIsAccessible = await checkS3Bucket();
-    if (!bucketIsAccessible) {
-      return res.status(500).json({ 
-        error: `Cannot access S3 bucket ${BUCKET_NAME}. Check bucket name and permissions.` 
-      });
-    }
-
-    // ファイル拡張子を確認（.wav または .mp3 ファイルが必要）
-    const fileExt = path.extname(req.file.path).toLowerCase();
-    if (fileExt !== '.wav' && fileExt !== '.mp3') {
-      return res.status(400).json({ error: 'Audio file must be .wav or .mp3 format' });
-    }
-
-    // ファイルサイズチェック
-    const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB制限
-    if (req.file.size > MAX_FILE_SIZE) {
-      return res.status(400).json({ 
-        error: `File size too large (${Math.round(req.file.size / (1024 * 1024))}MB). Maximum allowed is ${MAX_FILE_SIZE / (1024 * 1024)}MB` 
-      });
-    }
-
-    // 一意のジョブ名を生成
-    const jobName = `transcribe-job-${Date.now()}-${uuidv4().substring(0, 8)}`;
-    let s3Key;
-
-    // ファイルをS3にアップロード
-    s3Key = `uploads/audio-${Date.now()}${fileExt}`;
-    console.log(`Reading file from ${req.file.path} for upload to S3`);
-    const fileBuffer = fs.readFileSync(req.file.path);
-    
-    // ファイルをS3にアップロード
-    await uploadToS3(
-      fileBuffer, 
-      fileExt === '.wav' ? 'audio/wav' : 'audio/mp3', 
-      s3Key
-    );
-    
-    // アップロード後すぐにローカルファイルを削除（メモリを節約）
-    cleanup();
-    cleanup = null;
-    
-    // S3 URLを作成
-    const s3Uri = `s3://${BUCKET_NAME}/${s3Key}`;
-    console.log(`S3 URI for transcription: ${s3Uri}`);
-    
-    // ファイル形式を取得
-    const mediaFormat = fileExt.substring(1); // .wavから先頭の.を削除
-
-    console.log(`Starting transcription job: ${jobName}, format: ${mediaFormat}`);
-    
-    // Transcribeジョブを開始
-    const startCommand = new StartTranscriptionJobCommand({
-      TranscriptionJobName: jobName,
-      LanguageCode: 'ja-JP', // 日本語を指定
-      MediaFormat: mediaFormat,
-      Media: {
-        MediaFileUri: s3Uri,
-      },
-      // パラメータを調整して速度改善
-      Settings: {
-        MaxSpeakerLabels: 2,
-        ShowSpeakerLabels: false,
-        EnableChannelIdentification: false,
-      }
-    });
-    
-    console.log('Sending transcription job command');
-    await transcribeClient.send(startCommand);
-    console.log('Transcription job started');
-    
-    // ジョブが完了するまで待機
-    let job;
-    let status;
-    let attempts = 0;
-    const maxAttempts = 100; // 最大100回試行（約100秒）
-    
-    do {
-      attempts++;
-      console.log(`Checking job status, attempt ${attempts}/${maxAttempts}`);
-      
-      try {
-        job = await checkTranscriptionJobStatus(jobName);
-        status = job.TranscriptionJobStatus;
-        
-        console.log(`Transcription job status: ${status}`);
-        
-        if (status === 'FAILED') {
-          console.error(`Transcription job failed: ${job.FailureReason}`);
-          throw new Error(`Transcription job failed: ${job.FailureReason}`);
-        }
-        
-        if (status !== 'COMPLETED') {
-          // 1秒待機してから再確認
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      } catch (statusError) {
-        console.error('Error checking job status:', statusError);
-        if (attempts >= maxAttempts) {
-          throw new Error('Transcription timeout: Job status check failed too many times');
-        }
-        // エラーが発生しても続行（一時的なネットワークエラーなどの可能性）
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    } while (status !== 'COMPLETED' && attempts < maxAttempts);
-    
-    if (status !== 'COMPLETED') {
-      throw new Error('Transcription timeout: Job did not complete in the allowed time');
-    }
-    
-    console.log('Transcription job completed successfully');
-    
-    // トランスクリプション結果を取得
-    if (!job.Transcript || !job.Transcript.TranscriptFileUri) {
-      throw new Error('Transcription job completed but no transcript URI was provided');
-    }
-    
-    console.log(`Getting result from ${job.Transcript.TranscriptFileUri}`);
-    
-    // 結果JSONをダウンロード
-    const transcriptData = await downloadJson(job.Transcript.TranscriptFileUri);
-    
-    // トランスクリプションテキストを取得
-    if (!transcriptData.results || 
-        !transcriptData.results.transcripts || 
-        transcriptData.results.transcripts.length === 0) {
-      throw new Error('Transcription data is incomplete or empty');
-    }
-    
-    const transcriptionText = transcriptData.results.transcripts[0].transcript;
-    console.log(`Transcription result: ${transcriptionText}`);
-    
-    // 音声ファイルをS3から削除（容量節約）
-    try {
-      const deleteCommand = new DeleteObjectCommand({
-        Bucket: BUCKET_NAME,
-        Key: s3Key,
-      });
-      await s3.send(deleteCommand);
-      console.log(`Deleted S3 file: ${s3Key}`);
-    } catch (deleteError) {
-      console.error(`Warning: Could not delete S3 file: ${deleteError.message}`);
-      // 削除失敗は致命的ではないので続行
-    }
-    
-    res.json({ text: transcriptionText });
-  } catch (error) {
-    console.error('Transcription error:', error);
-    
-    // クリーンアップ実行
-    if (cleanup) {
-      cleanup();
-    }
-    
-    // エラーメッセージを詳細に
-    let errorMessage = 'Failed to transcribe audio';
-    if (error.message) {
-      errorMessage += ': ' + error.message;
-    }
-    if (error.code) {
-      errorMessage += ` (Code: ${error.code})`;
-    }
-    
-    // エラー応答
-    res.status(500).json({ error: errorMessage });
-  }
-});
-
 // AI応答生成エンドポイント
 app.post('/api/chat', async (req, res) => {
   // タイムアウト設定
@@ -444,15 +115,20 @@ app.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: 'Invalid message format' });
     }
     
+    console.log(`Received message: "${message.substring(0, 50)}${message.length > 50 ? '...' : ''}"`);
+    
     // 新しい会話かどうかをチェック
     if (!conversationId || !conversations[conversationId]) {
       // 新しい会話IDを生成
       const newConversationId = 'conv-' + uuidv4();
+      console.log(`Creating new conversation: ${newConversationId}`);
+      
       conversations[newConversationId] = {
         messages: [{ role: "user", content: message }]
       };
       
       // Claudeを使用してレスポンスを生成
+      console.log('Sending request to Claude API...');
       const response = await anthropic.messages.create({
         model: "claude-3-7-sonnet-20250219",
         max_tokens: 1000,
@@ -461,17 +137,22 @@ app.post('/api/chat', async (req, res) => {
       });
       
       // 応答を会話履歴に追加
+      const assistantResponse = response.content[0].text;
+      console.log(`Claude response: "${assistantResponse.substring(0, 50)}${assistantResponse.length > 50 ? '...' : ''}"`);
+      
       conversations[newConversationId].messages.push({ 
         role: "assistant", 
-        content: response.content[0].text 
+        content: assistantResponse 
       });
       
       res.json({ 
-        text: response.content[0].text,
+        text: assistantResponse,
         conversationId: newConversationId
       });
     } else {
       // 既存の会話の場合
+      console.log(`Continuing conversation: ${conversationId}`);
+      
       // ユーザーメッセージを追加
       conversations[conversationId].messages.push({ 
         role: "user", 
@@ -479,6 +160,7 @@ app.post('/api/chat', async (req, res) => {
       });
       
       // Claudeを使用してレスポンスを生成
+      console.log('Sending request to Claude API...');
       const response = await anthropic.messages.create({
         model: "claude-3-7-sonnet-20250219",
         max_tokens: 1000,
@@ -487,13 +169,16 @@ app.post('/api/chat', async (req, res) => {
       });
       
       // 応答を会話履歴に追加
+      const assistantResponse = response.content[0].text;
+      console.log(`Claude response: "${assistantResponse.substring(0, 50)}${assistantResponse.length > 50 ? '...' : ''}"`);
+      
       conversations[conversationId].messages.push({ 
         role: "assistant", 
-        content: response.content[0].text 
+        content: assistantResponse 
       });
       
       res.json({ 
-        text: response.content[0].text,
+        text: assistantResponse,
         conversationId: conversationId
       });
     }
@@ -517,6 +202,8 @@ app.post('/api/speech', async (req, res) => {
       return res.status(400).json({ error: 'Invalid text format' });
     }
     
+    console.log(`Synthesizing speech for text: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
+    
     // Google Text-to-Speechが利用可能かチェック
     if (!ttsClient) {
       return res.status(500).json({ error: 'Text-to-speech service not available' });
@@ -529,8 +216,10 @@ app.post('/api/speech', async (req, res) => {
       audioConfig: { audioEncoding: 'MP3' },
     };
 
+    console.log('Sending request to Google TTS API...');
     // テキストを音声に変換
     const [response] = await ttsClient.synthesizeSpeech(request);
+    console.log(`Speech synthesis successful, audio size: ${response.audioContent.length} bytes`);
     
     const outputFileName = `speech-${Date.now()}.mp3`;
     
@@ -540,11 +229,12 @@ app.post('/api/speech', async (req, res) => {
       await uploadToS3(response.audioContent, 'audio/mp3', s3Key);
       
       // 署名付きURLを生成（一時的なアクセス用）
-      const command = new GetObjectCommand({
+      const command = {
         Bucket: BUCKET_NAME,
         Key: s3Key,
-      });
+      };
       
+      console.log('Generating signed URL...');
       const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
       
       // URLを返す
@@ -565,7 +255,12 @@ app.post('/api/speech', async (req, res) => {
       }, 5 * 60 * 1000);
     } else {
       // ローカルに一時的に音声ファイルを保存
-      const outputFile = path.join('./temp', outputFileName);
+      const tempDir = './temp';
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+      
+      const outputFile = path.join(tempDir, outputFileName);
       fs.writeFileSync(outputFile, response.audioContent, 'binary');
       
       // 音声ファイルを送信
@@ -589,35 +284,14 @@ if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir, { recursive: true });
 }
 
-const uploadsDir = './uploads';
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// S3設定チェック
-async function checkS3Configuration() {
-  if (useS3) {
-    try {
-      const bucketIsAccessible = await checkS3Bucket();
-      if (!bucketIsAccessible) {
-        console.error(`WARNING: Cannot access S3 bucket ${BUCKET_NAME}. Check bucket name and permissions.`);
-      } else {
-        console.log(`S3 bucket ${BUCKET_NAME} is accessible.`);
-      }
-    } catch (error) {
-      console.error(`Error checking S3 configuration: ${error.message}`);
-    }
-  }
-}
-
 // サーバーの起動
 const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Using S3 for storage: ${useS3 ? 'Yes' : 'No'}`);
   if (useS3) {
     console.log(`S3 Bucket: ${BUCKET_NAME}, Region: ${AWS_REGION}`);
-    await checkS3Configuration();
   }
+  console.log(`Note: Using Web Speech API for client-side speech recognition`);
 });
 
 // サーバーのタイムアウト設定
