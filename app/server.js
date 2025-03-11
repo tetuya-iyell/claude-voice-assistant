@@ -19,6 +19,7 @@ const {
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { v4: uuidv4 } = require('uuid');
 const { PassThrough } = require('stream');
+const https = require('https');
 
 // Google Cloud クライアントを条件付きで読み込む
 let textToSpeech;
@@ -155,34 +156,41 @@ async function checkTranscriptionJobStatus(jobName) {
   }
 }
 
+// HTTPSでJSONをダウンロードする関数
+function downloadJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to download: ${response.statusCode}`));
+        return;
+      }
+
+      let data = '';
+      response.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      response.on('end', () => {
+        try {
+          const parsedData = JSON.parse(data);
+          resolve(parsedData);
+        } catch (err) {
+          reject(new Error(`Failed to parse JSON: ${err.message}`));
+        }
+      });
+    }).on('error', (err) => {
+      reject(err);
+    });
+  });
+}
+
 // 音声認識ジョブの結果を取得する関数
 async function getTranscriptionResult(transcriptFileUri) {
   try {
-    // URIからS3パスを解析
-    const url = new URL(transcriptFileUri);
-    const bucket = url.hostname.split('.')[0];
-    const key = url.pathname.substring(1); // 先頭の/を削除
+    console.log(`Getting transcription result from URI: ${transcriptFileUri}`);
     
-    console.log(`Getting transcription result. Bucket: ${bucket}, Key: ${key}`);
-    
-    // S3からJSONファイルを取得
-    const command = new GetObjectCommand({
-      Bucket: bucket,
-      Key: key,
-    });
-    
-    const response = await s3.send(command);
-    
-    // レスポンスをテキストに変換
-    const responseBody = await new Promise((resolve, reject) => {
-      const chunks = [];
-      response.Body.on('data', (chunk) => chunks.push(chunk));
-      response.Body.on('error', reject);
-      response.Body.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-    });
-    
-    // JSONをパース
-    const transcriptData = JSON.parse(responseBody);
+    // 直接HTTPSリクエストでJSONをダウンロード
+    const transcriptData = await downloadJson(transcriptFileUri);
     
     // トランスクリプションテキストを返す
     return transcriptData.results.transcripts[0].transcript;
@@ -291,6 +299,7 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
       console.log('Transcription job completed successfully');
       
       // トランスクリプション結果を取得
+      // S3 URIの代わりにHTTPS URLを使用する
       console.log(`Getting result from ${job.Transcript.TranscriptFileUri}`);
       const transcriptionText = await getTranscriptionResult(job.Transcript.TranscriptFileUri);
       console.log(`Transcription result: ${transcriptionText}`);
