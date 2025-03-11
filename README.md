@@ -24,6 +24,35 @@ Claude APIを使用した音声会話アプリケーションです。このア�
 - AWS CDK CLI (`npm install -g aws-cdk`)
 - Docker
 
+### AWS リージョンの設定
+
+このアプリケーションは、デフォルトで `us-east-1` リージョンにデプロイするよう設計されています。リージョンを設定するには、以下の方法があります：
+
+1. **AWS CLIの設定を使用** (推奨):
+   ```bash
+   aws configure set region us-east-1
+   ```
+
+2. **環境変数で設定**:
+   ```bash
+   # Linuxまたは macOS
+   export AWS_REGION=us-east-1
+   export CDK_DEPLOY_REGION=us-east-1
+   
+   # Windows (コマンドプロンプト)
+   set AWS_REGION=us-east-1
+   set CDK_DEPLOY_REGION=us-east-1
+   
+   # Windows (PowerShell)
+   $env:AWS_REGION = "us-east-1"
+   $env:CDK_DEPLOY_REGION = "us-east-1"
+   ```
+
+3. **CDKコマンド実行時に指定**:
+   ```bash
+   cdk deploy --context aws:region=us-east-1
+   ```
+
 ### 1. CDKプロジェクトのセットアップとデプロイ
 
 ```bash
@@ -34,7 +63,7 @@ cd cdk
 npm install
 
 # AWS環境の初期化（初回のみ）
-cdk bootstrap
+cdk bootstrap aws://ACCOUNT-NUMBER/us-east-1
 
 # デプロイ内容の確認
 cdk diff
@@ -68,7 +97,7 @@ cd app
 # Dockerイメージのビルド
 docker build -t claude-voice-assistant .
 
-# AWSにログイン
+# AWSにログイン (us-east-1リージョンを指定)
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}
 
 # イメージにタグ付け
@@ -84,7 +113,8 @@ docker push ${ECR_REPOSITORY_URI}:latest
 aws ecs update-service \
   --cluster claude-voice-assistant-cluster \
   --service claude-voice-assistant-service \
-  --force-new-deployment
+  --force-new-deployment \
+  --region us-east-1
 ```
 
 ### 4. アプリケーションへのアクセス
@@ -141,6 +171,7 @@ npm install
 # .envファイルを作成し、必要なAPIキーを設定
 cp .env.example .env
 # .envファイルを編集して必要な情報を追加
+# 重要: S3_BUCKET_NAME と AWS_REGION=us-east-1 を設定する
 
 # アプリケーションの起動
 npm run dev
@@ -155,7 +186,7 @@ npm run dev
 AWS CloudWatchを使用して、アプリケーションのログとメトリクスをモニタリングできます：
 
 ```bash
-# ログストリームの確認
+# ログストリームの確認 (us-east-1リージョンを指定)
 aws logs get-log-events \
   --log-group-name /ecs/claude-voice-assistant \
   --log-stream-name $(aws logs describe-log-streams \
@@ -164,7 +195,9 @@ aws logs get-log-events \
     --descending \
     --limit 1 \
     --query 'logStreams[0].logStreamName' \
-    --output text)
+    --output text \
+    --region us-east-1) \
+  --region us-east-1
 ```
 
 ### リソースのクリーンアップ
@@ -173,7 +206,7 @@ aws logs get-log-events \
 
 ```bash
 cd cdk
-cdk destroy
+cdk destroy --region us-east-1
 ```
 
 ## トラブルシューティング
@@ -184,10 +217,18 @@ cdk destroy
   - S3バケットへのアクセス権限を確認
   - ファイル形式がサポートされているか確認
   - IAM権限が適切に設定されているか確認
+  - リージョン設定が一致しているか確認（アプリケーションとS3バケットが同じリージョンにあるべき）
 
 - **処理が遅い場合**:
   - AWS Transcribeは非同期処理のため、短い音声でも数秒の処理時間が必要です
   - 長い音声ファイルの場合はさらに時間がかかります
+
+### リージョン関連の問題
+
+- **リソースが見つからない場合**:
+  - すべてのリソースが同じリージョン（us-east-1）にあることを確認
+  - AWS CLIやSDKの操作時にリージョンを明示的に指定
+  - CDKデプロイがus-east-1に対して行われたことを確認
 
 ### その他の一般的な問題については、[app/README.md](app/README.md)を参照してください。
 
