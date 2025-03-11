@@ -7,6 +7,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as path from 'path';
 import { Construct } from 'constructs';
 
 export class ClaudeVoiceAssistantStack extends cdk.Stack {
@@ -110,9 +111,14 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
     // タスクロールにTranscribeポリシーを追加
     taskDefinition.taskRole.addToPrincipalPolicy(transcribePolicy);
 
+    // コンテナイメージをローカルのDockerfileからビルドし、ECRにプッシュ
+    // ディレクトリ構造に注意: CDKディレクトリ(cdk/)の一つ上の階層にappディレクトリがあること
+    const containerImage = ecs.ContainerImage.fromAsset(path.join(__dirname, '../../app'));
+
     // コンテナ定義
     const container = taskDefinition.addContainer('ClaudeVoiceAssistantContainer', {
-      image: ecs.ContainerImage.fromEcrRepository(repository, 'latest'),
+      // イメージをリポジトリから参照するのではなく、ローカルからビルド
+      image: containerImage,
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'claude-voice-assistant',
         logGroup,
@@ -136,9 +142,9 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       healthCheck: {
         command: ['CMD-SHELL', 'curl -f http://localhost:3000/health || exit 1'],
         interval: cdk.Duration.seconds(30),
-        timeout: cdk.Duration.seconds(5),
+        timeout: cdk.Duration.seconds(10), // タイムアウトを増やす
         retries: 3,
-        startPeriod: cdk.Duration.seconds(60),
+        startPeriod: cdk.Duration.seconds(120), // 起動待機時間を増やす
       },
     });
 
@@ -174,7 +180,7 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       desiredCount: 2,
       securityGroups: [securityGroup],
       assignPublicIp: false,
-      healthCheckGracePeriod: cdk.Duration.seconds(60),
+      healthCheckGracePeriod: cdk.Duration.seconds(180), // ヘルスチェックの猶予期間を長く設定
     });
 
     // ロードバランサーのターゲットとしてサービスを追加
