@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Voice Assistant</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Claude Voice Assistant</h1>
+            <p>マイクボタンをクリックして話しかけてください</p>
+        </header>
+        
+        <div class="chat-container" id="chat-container">
+            <div class="message assistant">
+                <div class="message-content">こんにちは！何かお手伝いできることはありますか？</div>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <div class="status" id="status">準備完了</div>
+            <button id="mic-button" class="mic-button">
+                <span class="mic-icon">🎤</span>
+            </button>
+        </div>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
