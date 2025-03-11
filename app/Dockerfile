@@ -2,20 +2,20 @@ FROM node:18-slim
 
 WORKDIR /usr/src/app
 
-# Install dependencies required for audio processing
+# Install dependencies required for audio processing and node-gyp
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
+    python3 \
+    make \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
-
-# Use AWS SDK for JavaScript instead of AWS CLI
-# This avoids the need to install Python and AWS CLI
 
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install dependencies with more verbose output and without audit
+RUN npm install --no-audit --verbose
 
 # Copy application code
 COPY . .
