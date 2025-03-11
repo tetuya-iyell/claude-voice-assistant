@@ -5,8 +5,17 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { Anthropic } = require('@anthropic-ai/sdk');
-const OpenAI = require('openai');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { 
+  S3Client, 
+  PutObjectCommand, 
+  GetObjectCommand, 
+  DeleteObjectCommand 
+} = require('@aws-sdk/client-s3');
+const { 
+  TranscribeClient, 
+  StartTranscriptionJobCommand, 
+  GetTranscriptionJobCommand 
+} = require('@aws-sdk/client-transcribe');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { v4: uuidv4 } = require('uuid');
 const { PassThrough } = require('stream');
@@ -31,9 +40,17 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
+// AWS リージョン
+const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+
 // S3クライアントの初期化
 const s3 = new S3Client({
-  region: process.env.AWS_REGION || 'us-east-1',
+  region: AWS_REGION,
+});
+
+// Transcribeクライアントの初期化
+const transcribeClient = new TranscribeClient({
+  region: AWS_REGION,
 });
 
 const BUCKET_NAME = process.env.S3_BUCKET_NAME;
@@ -59,10 +76,6 @@ const upload = multer({ storage });
 // クライアントの初期化
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
-});
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
 });
 
 // Google Cloud Text-to-Speech クライアントの初期化
@@ -120,6 +133,56 @@ async function getBufferFromS3(key) {
   });
 }
 
+// AWS Transcribeジョブのステータスを確認する関数
+async function checkTranscriptionJobStatus(jobName) {
+  const command = new GetTranscriptionJobCommand({
+    TranscriptionJobName: jobName,
+  });
+
+  try {
+    const response = await transcribeClient.send(command);
+    return response.TranscriptionJob;
+  } catch (error) {
+    console.error('Error checking transcription job status:', error);
+    throw error;
+  }
+}
+
+// 音声認識ジョブの結果を取得する関数
+async function getTranscriptionResult(transcriptFileUri) {
+  try {
+    // URIからS3パスを解析
+    const url = new URL(transcriptFileUri);
+    const bucket = url.hostname.split('.')[0];
+    const key = url.pathname.substring(1); // 先頭の/を削除
+    
+    // S3からJSONファイルを取得
+    const command = new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+    });
+    
+    const response = await s3.send(command);
+    
+    // レスポンスをテキストに変換
+    const responseBody = await new Promise((resolve, reject) => {
+      const chunks = [];
+      response.Body.on('data', (chunk) => chunks.push(chunk));
+      response.Body.on('error', reject);
+      response.Body.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    });
+    
+    // JSONをパース
+    const transcriptData = JSON.parse(responseBody);
+    
+    // トランスクリプションテキストを返す
+    return transcriptData.results.transcripts[0].transcript;
+  } catch (error) {
+    console.error('Error getting transcription result:', error);
+    throw error;
+  }
+}
+
 // 音声認識エンドポイント
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
   try {
@@ -128,52 +191,69 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
       return res.status(400).json({ error: 'No audio file provided' });
     }
 
-    let audioFile;
+    // 一意のジョブ名を生成
+    const jobName = `transcribe-job-${Date.now()}-${uuidv4().substring(0, 8)}`;
     let s3Key;
 
     if (useS3) {
       // ファイルをS3にアップロード
-      s3Key = `uploads/audio-${Date.now()}.webm`;
-      await uploadToS3(fs.readFileSync(req.file.path), 'audio/webm', s3Key);
+      s3Key = `uploads/audio-${Date.now()}.wav`;
+      await uploadToS3(fs.readFileSync(req.file.path), 'audio/wav', s3Key);
+      
+      // S3 URLを作成
+      const s3Uri = `s3://${BUCKET_NAME}/${s3Key}`;
+      
+      // Transcribeジョブを開始
+      const startCommand = new StartTranscriptionJobCommand({
+        TranscriptionJobName: jobName,
+        LanguageCode: 'ja-JP', // 日本語を指定
+        MediaFormat: path.extname(req.file.path).substring(1) || 'wav', // ファイル拡張子から形式を取得
+        Media: {
+          MediaFileUri: s3Uri,
+        },
+        OutputBucketName: BUCKET_NAME,
+        OutputKey: `transcripts/${jobName}.json`,
+      });
+      
+      await transcribeClient.send(startCommand);
+      
+      // ジョブが完了するまで待機
+      let job;
+      let status;
+      do {
+        job = await checkTranscriptionJobStatus(jobName);
+        status = job.TranscriptionJobStatus;
+        
+        if (status === 'FAILED') {
+          throw new Error(`Transcription job failed: ${job.FailureReason}`);
+        }
+        
+        if (status !== 'COMPLETED') {
+          // 1秒待機してから再確認
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      } while (status !== 'COMPLETED');
+      
+      // トランスクリプション結果を取得
+      const transcriptionText = await getTranscriptionResult(job.Transcript.TranscriptFileUri);
+      
       // ローカルの一時ファイルを削除
       fs.unlinkSync(req.file.path);
-      // S3から読み込む
-      audioFile = await getBufferFromS3(s3Key);
+      
+      res.json({ text: transcriptionText });
     } else {
-      // ローカルファイルを使用
-      audioFile = fs.readFileSync(req.file.path);
+      // S3が使用できない場合はサポートされていないことを通知
+      res.status(501).json({ 
+        error: 'AWS Transcribe requires S3 bucket. Please set S3_BUCKET_NAME environment variable.' 
+      });
     }
-
-    // OpenAI Whisper APIを使用して音声認識
-    const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(req.file.path),
-      model: "whisper-1",
-    });
-
-    // S3に上げた場合はS3上のファイルを削除
-    if (useS3 && s3Key) {
-      try {
-        const deleteCommand = new DeleteObjectCommand({
-          Bucket: BUCKET_NAME,
-          Key: s3Key,
-        });
-        await s3.send(deleteCommand);
-      } catch (err) {
-        console.error('Error deleting file from S3:', err);
-      }
-    } else {
-      // ローカルの一時ファイルを削除
-      fs.unlinkSync(req.file.path);
-    }
-
-    res.json({ text: transcription.text });
   } catch (error) {
     console.error('Transcription error:', error);
     // ファイルのクリーンアップを試みる
     if (req.file && req.file.path && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
-    res.status(500).json({ error: 'Failed to transcribe audio' });
+    res.status(500).json({ error: 'Failed to transcribe audio: ' + error.message });
   }
 });
 
