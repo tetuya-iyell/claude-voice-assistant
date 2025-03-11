@@ -19,8 +19,6 @@ const {
 } = require('@aws-sdk/client-transcribe');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { v4: uuidv4 } = require('uuid');
-const { PassThrough } = require('stream');
-const https = require('https');
 const axios = require('axios').default;
 
 // Google Cloud クライアントを条件付きで読み込む
@@ -38,22 +36,40 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// タイムアウト設定を増やす (2分)
+const TIMEOUT_MS = 120000;
+
 // ミドルウェアの設定
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static('public'));
 
 // AWS リージョン
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 
+// リクエストタイムアウトの設定
+app.use((req, res, next) => {
+  req.setTimeout(TIMEOUT_MS);
+  res.setTimeout(TIMEOUT_MS);
+  next();
+});
+
 // S3クライアントの初期化
 const s3 = new S3Client({
   region: AWS_REGION,
+  maxAttempts: 5, // 再試行回数を増やす
 });
 
 // Transcribeクライアントの初期化
 const transcribeClient = new TranscribeClient({
   region: AWS_REGION,
+  maxAttempts: 5, // 再試行回数を増やす
+});
+
+// Axiosにタイムアウト設定
+const axiosInstance = axios.create({
+  timeout: TIMEOUT_MS,
 });
 
 const BUCKET_NAME = process.env.S3_BUCKET_NAME;
@@ -66,7 +82,7 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const dir = './uploads';
     if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir);
+      fs.mkdirSync(dir, { recursive: true });
     }
     cb(null, dir);
   },
@@ -74,7 +90,12 @@ const storage = multer.diskStorage({
     cb(null, `audio-${Date.now()}${path.extname(file.originalname)}`);
   }
 });
-const upload = multer({ storage });
+
+// ファイルサイズ制限の設定 (50MB)
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024 } 
+});
 
 // クライアントの初期化
 const anthropic = new Anthropic({
@@ -104,7 +125,7 @@ app.get('/health', (req, res) => {
 // S3にファイルをアップロードする関数
 async function uploadToS3(fileBuffer, contentType, key) {
   try {
-    console.log(`Uploading to S3. Bucket: ${BUCKET_NAME}, Key: ${key}`);
+    console.log(`Uploading to S3. Bucket: ${BUCKET_NAME}, Key: ${key}, Size: ${fileBuffer.length} bytes`);
     const command = new PutObjectCommand({
       Bucket: BUCKET_NAME,
       Key: key,
@@ -162,7 +183,7 @@ async function checkTranscriptionJobStatus(jobName) {
 async function downloadJson(url) {
   try {
     console.log(`Downloading JSON from: ${url}`);
-    const response = await axios.get(url);
+    const response = await axiosInstance.get(url);
     return response.data;
   } catch (error) {
     console.error(`Error downloading JSON: ${error.message}`);
@@ -208,6 +229,12 @@ async function checkS3Bucket() {
 
 // 音声認識エンドポイント
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
+  // タイムアウトを避けるためにタイムアウト時間を設定
+  req.setTimeout(TIMEOUT_MS);
+  res.setTimeout(TIMEOUT_MS);
+  
+  let cleanup = null;
+  
   try {
     // 音声ファイルが存在しない場合はエラー
     if (!req.file) {
@@ -223,6 +250,18 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
       });
     }
 
+    // 先にクリーンアップ関数を設定
+    cleanup = () => {
+      try {
+        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+          console.log(`Deleted temporary file: ${req.file.path}`);
+        }
+      } catch (err) {
+        console.error(`Error during cleanup: ${err.message}`);
+      }
+    };
+
     // S3バケットのアクセス確認
     const bucketIsAccessible = await checkS3Bucket();
     if (!bucketIsAccessible) {
@@ -231,14 +270,14 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
       });
     }
 
-    // ファイル拡張子を確認（.wav ファイルが必要）
+    // ファイル拡張子を確認（.wav または .mp3 ファイルが必要）
     const fileExt = path.extname(req.file.path).toLowerCase();
     if (fileExt !== '.wav' && fileExt !== '.mp3') {
       return res.status(400).json({ error: 'Audio file must be .wav or .mp3 format' });
     }
 
-    // ファイルサイズチェック（Transcribeは最大4時間、2GBまで）
-    const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB制限（安全マージン）
+    // ファイルサイズチェック
+    const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB制限
     if (req.file.size > MAX_FILE_SIZE) {
       return res.status(400).json({ 
         error: `File size too large (${Math.round(req.file.size / (1024 * 1024))}MB). Maximum allowed is ${MAX_FILE_SIZE / (1024 * 1024)}MB` 
@@ -254,11 +293,16 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     console.log(`Reading file from ${req.file.path} for upload to S3`);
     const fileBuffer = fs.readFileSync(req.file.path);
     
+    // ファイルをS3にアップロード
     await uploadToS3(
       fileBuffer, 
       fileExt === '.wav' ? 'audio/wav' : 'audio/mp3', 
       s3Key
     );
+    
+    // アップロード後すぐにローカルファイルを削除（メモリを節約）
+    cleanup();
+    cleanup = null;
     
     // S3 URLを作成
     const s3Uri = `s3://${BUCKET_NAME}/${s3Key}`;
@@ -277,7 +321,12 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
       Media: {
         MediaFileUri: s3Uri,
       },
-      // OutputBucketNameとOutputKeyを使わず、直接URLを取得するように変更
+      // パラメータを調整して速度改善
+      Settings: {
+        MaxSpeakerLabels: 2,
+        ShowSpeakerLabels: false,
+        EnableChannelIdentification: false,
+      }
     });
     
     console.log('Sending transcription job command');
@@ -288,7 +337,7 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     let job;
     let status;
     let attempts = 0;
-    const maxAttempts = 60; // 最大60回試行（約60秒）
+    const maxAttempts = 100; // 最大100回試行（約100秒）
     
     do {
       attempts++;
@@ -345,26 +394,55 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     const transcriptionText = transcriptData.results.transcripts[0].transcript;
     console.log(`Transcription result: ${transcriptionText}`);
     
-    // ローカルの一時ファイルを削除
-    fs.unlinkSync(req.file.path);
-    console.log(`Deleted temporary file: ${req.file.path}`);
+    // 音声ファイルをS3から削除（容量節約）
+    try {
+      const deleteCommand = new DeleteObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: s3Key,
+      });
+      await s3.send(deleteCommand);
+      console.log(`Deleted S3 file: ${s3Key}`);
+    } catch (deleteError) {
+      console.error(`Warning: Could not delete S3 file: ${deleteError.message}`);
+      // 削除失敗は致命的ではないので続行
+    }
     
     res.json({ text: transcriptionText });
   } catch (error) {
     console.error('Transcription error:', error);
-    // ファイルのクリーンアップを試みる
-    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-      console.log(`Deleted temporary file after error: ${req.file.path}`);
+    
+    // クリーンアップ実行
+    if (cleanup) {
+      cleanup();
     }
-    res.status(500).json({ error: 'Failed to transcribe audio: ' + error.message });
+    
+    // エラーメッセージを詳細に
+    let errorMessage = 'Failed to transcribe audio';
+    if (error.message) {
+      errorMessage += ': ' + error.message;
+    }
+    if (error.code) {
+      errorMessage += ` (Code: ${error.code})`;
+    }
+    
+    // エラー応答
+    res.status(500).json({ error: errorMessage });
   }
 });
 
 // AI応答生成エンドポイント
 app.post('/api/chat', async (req, res) => {
+  // タイムアウト設定
+  req.setTimeout(TIMEOUT_MS);
+  res.setTimeout(TIMEOUT_MS);
+  
   try {
     const { message, conversationId } = req.body;
+    
+    // 入力値チェック
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'Invalid message format' });
+    }
     
     // 新しい会話かどうかをチェック
     if (!conversationId || !conversations[conversationId]) {
@@ -421,14 +499,23 @@ app.post('/api/chat', async (req, res) => {
     }
   } catch (error) {
     console.error('Chat error:', error);
-    res.status(500).json({ error: 'Failed to generate response' });
+    res.status(500).json({ error: 'Failed to generate response: ' + (error.message || 'Unknown error') });
   }
 });
 
 // 音声合成エンドポイント
 app.post('/api/speech', async (req, res) => {
+  // タイムアウト設定
+  req.setTimeout(TIMEOUT_MS);
+  res.setTimeout(TIMEOUT_MS);
+  
   try {
     const { text } = req.body;
+    
+    // 入力値チェック
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'Invalid text format' });
+    }
     
     // Google Text-to-Speechが利用可能かチェック
     if (!ttsClient) {
@@ -492,19 +579,19 @@ app.post('/api/speech', async (req, res) => {
     }
   } catch (error) {
     console.error('Speech synthesis error:', error);
-    res.status(500).json({ error: 'Failed to synthesize speech' });
+    res.status(500).json({ error: 'Failed to synthesize speech: ' + (error.message || 'Unknown error') });
   }
 });
 
 // 一時ファイル用のディレクトリを作成
 const tempDir = './temp';
 if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir);
+  fs.mkdirSync(tempDir, { recursive: true });
 }
 
 const uploadsDir = './uploads';
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir);
+  fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
 // S3設定チェック
@@ -524,7 +611,7 @@ async function checkS3Configuration() {
 }
 
 // サーバーの起動
-app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Using S3 for storage: ${useS3 ? 'Yes' : 'No'}`);
   if (useS3) {
@@ -532,3 +619,6 @@ app.listen(PORT, async () => {
     await checkS3Configuration();
   }
 });
+
+// サーバーのタイムアウト設定
+server.timeout = TIMEOUT_MS;
