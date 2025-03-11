@@ -178,8 +178,10 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
     });
 
     // ロードバランサーのターゲットとしてサービスを追加
+    // プロトコルを明示的に指定
     listener.addTargets('ClaudeVoiceAssistantTarget', {
       port: 3000,
+      protocol: elbv2.ApplicationProtocol.HTTP,
       targets: [service],
       healthCheck: {
         path: '/health',
