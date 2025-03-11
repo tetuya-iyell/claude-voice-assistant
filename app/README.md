@@ -20,6 +20,7 @@
 - AWS設定:
   - S3バケットアクセス（必須）
   - Transcribeサービス利用権限
+  - AWS_REGION=us-east-1（推奨）
 
 ## ローカル開発
 
@@ -32,7 +33,7 @@
    ```bash
    # .envファイルを作成
    cp .env.example .env
-   # 各APIキーを設定
+   # 各APIキーを設定し、AWS_REGIONをus-east-1に設定
    ```
 
 3. アプリケーションを起動:
@@ -50,15 +51,20 @@
    - AWS Transcribeは音声ファイルをS3から読み取り、結果もS3に保存します
    - S3_BUCKET_NAME環境変数が必須です
 
-2. **処理時間**:
+2. **リージョン設定**:
+   - S3バケットとTranscribeサービスは同じリージョンである必要があります
+   - デフォルトでは `us-east-1` を使用します
+   - 他のリージョンを使用する場合は、S3バケットとTranscribeサービスの両方に同じリージョンを指定する必要があります
+
+3. **処理時間**:
    - 短い音声ファイルでも数秒の処理時間がかかります
    - アプリケーションはジョブが完了するまで待機します
 
-3. **サポート言語**:
+4. **サポート言語**:
    - デフォルトでは日本語（ja-JP）に設定されています
    - 他の言語を使用する場合は、`server.js`の`StartTranscriptionJobCommand`設定を変更してください
 
-4. **ファイル形式**:
+5. **ファイル形式**:
    - サポートされるファイル形式: WAV, MP3, MP4, FLAC, AMR, OGG, WebMなど
    - 詳細はAWS Transcribe公式ドキュメントを参照してください
 
@@ -78,6 +84,31 @@ docker run -p 3000:3000 \
 
 AWS環境へのデプロイは、リポジトリのルートディレクトリにあるCDKコードを使用して行います。
 
+### AWS リージョンの設定
+
+このアプリケーションはデフォルトで `us-east-1` リージョンを使用します。ローカル開発時には以下の方法でリージョンを設定できます：
+
+1. **.env ファイルに設定**:
+   ```
+   AWS_REGION=us-east-1
+   ```
+
+2. **環境変数で設定**:
+   ```bash
+   # Linux/macOS
+   export AWS_REGION=us-east-1
+   
+   # Windows
+   set AWS_REGION=us-east-1
+   ```
+
+3. **コードで明示的に指定**:
+   必要に応じて、AWS SDKクライアント初期化時にリージョンを指定できます：
+   ```javascript
+   const s3 = new S3Client({ region: 'us-east-1' });
+   const transcribeClient = new TranscribeClient({ region: 'us-east-1' });
+   ```
+
 ### ECRへのイメージプッシュ
 
 1. AWSにログイン:
@@ -88,7 +119,7 @@ AWS環境へのデプロイは、リポジトリのルートディレクトリ�
 2. CDKデプロイ後にECRリポジトリURLを取得:
    ```bash
    # CDKスタック出力から
-   ECR_REPO_URL=$(aws cloudformation describe-stacks --stack-name ClaudeVoiceAssistantStack --query "Stacks[0].Outputs[?OutputKey=='EcrRepositoryUri'].OutputValue" --output text)
+   ECR_REPO_URL=$(aws cloudformation describe-stacks --stack-name ClaudeVoiceAssistantStack --query "Stacks[0].Outputs[?OutputKey=='EcrRepositoryUri'].OutputValue" --output text --region us-east-1)
    ```
 
 3. イメージにタグを付けてプッシュ:
@@ -107,7 +138,8 @@ aws secretsmanager update-secret \
   --secret-string '{
     "ANTHROPIC_API_KEY": "sk-ant-your-anthropic-api-key",
     "GOOGLE_APPLICATION_CREDENTIALS_JSON": "{\"type\":\"service_account\",\"project_id\":\"your-project-id\",\"private_key\":\"-----BEGIN PRIVATE KEY-----\\nYOUR_PRIVATE_KEY\\n-----END PRIVATE KEY-----\\n\",\"client_email\":\"your-service-account@your-project.iam.gserviceaccount.com\",\"client_id\":\"client-id\",\"auth_uri\":\"https://accounts.google.com/o/oauth2/auth\",\"token_uri\":\"https://oauth2.googleapis.com/token\",\"auth_provider_x509_cert_url\":\"https://www.googleapis.com/oauth2/v1/certs\",\"client_x509_cert_url\":\"https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com\",\"universe_domain\":\"googleapis.com\"}"
-  }'
+  }' \
+  --region us-east-1
 ```
 
 ## 環境変数
@@ -147,10 +179,23 @@ app/
 - S3バケットが設定されていない場合、音声認識は機能しません
 - 処理に時間がかかる場合は、AWS Transcribeジョブのステータスを確認してください:
   ```bash
-  aws transcribe get-transcription-job --transcription-job-name [JOB_NAME]
+  aws transcribe get-transcription-job --transcription-job-name [JOB_NAME] --region us-east-1
   ```
 - S3バケットへのアクセス権限が正しく設定されているか確認してください
 - サポートされているファイル形式であることを確認してください
+- S3バケットとTranscribeサービスが同じリージョン（通常はus-east-1）にあることを確認してください
+
+### AWS認証情報の問題
+
+認証情報やリージョンに関する問題が発生した場合は、以下を確認してください：
+
+- AWS CLIが正しく設定されていること:
+  ```bash
+  aws configure list
+  ```
+- AWSプロファイルが正しいこと
+- 環境変数 `AWS_REGION` が明示的に設定されていること
+- AWS_PROFILE 環境変数が設定されている場合は、そのプロファイルのリージョン設定も確認
 
 ### 音声合成の問題
 
