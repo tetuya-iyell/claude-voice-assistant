@@ -43,7 +43,6 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       generateSecretString: {
         secretStringTemplate: JSON.stringify({
           ANTHROPIC_API_KEY: '',
-          OPENAI_API_KEY: '',
           GOOGLE_APPLICATION_CREDENTIALS_JSON: '',
         }),
         generateStringKey: 'password',
@@ -82,6 +81,20 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
     // シークレットマネージャーへのアクセス権をタスク実行ロールに付与
     appSecrets.grantRead(taskDefinition.executionRole!);
 
+    // Transcribeサービス用のポリシーを追加
+    const transcribePolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'transcribe:StartTranscriptionJob',
+        'transcribe:GetTranscriptionJob',
+        'transcribe:ListTranscriptionJobs',
+      ],
+      resources: ['*'],  // Transcribeは特定のARNターゲットをサポートしていないため、*を使用
+    });
+
+    // タスク実行ロールにTranscribeポリシーを追加
+    taskDefinition.taskRole.addToPrincipalPolicy(transcribePolicy);
+
     // コンテナ定義
     const container = taskDefinition.addContainer('ClaudeVoiceAssistantContainer', {
       image: ecs.ContainerImage.fromEcrRepository(repository, 'latest'),
@@ -92,10 +105,10 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       environment: {
         NODE_ENV: 'production',
         S3_BUCKET_NAME: tempFilesBucket.bucketName,
+        AWS_REGION: this.region,
       },
       secrets: {
         ANTHROPIC_API_KEY: ecs.Secret.fromSecretsManager(appSecrets, 'ANTHROPIC_API_KEY'),
-        OPENAI_API_KEY: ecs.Secret.fromSecretsManager(appSecrets, 'OPENAI_API_KEY'),
         GOOGLE_APPLICATION_CREDENTIALS_JSON: ecs.Secret.fromSecretsManager(appSecrets, 'GOOGLE_APPLICATION_CREDENTIALS_JSON'),
       },
       portMappings: [
