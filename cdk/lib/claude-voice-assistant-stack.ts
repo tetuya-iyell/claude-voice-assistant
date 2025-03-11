@@ -33,17 +33,12 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       containerInsights: true,
     });
 
-    // ECRリポジトリ作成
-    const repository = new ecr.Repository(this, 'ClaudeVoiceAssistantRepo', {
-      repositoryName: 'claude-voice-assistant',
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      lifecycleRules: [
-        {
-          maxImageCount: 10,
-          description: 'Keep only the last 10 images',
-        },
-      ],
-    });
+    // 既存のECRリポジトリを参照する（作成しない）
+    const repository = ecr.Repository.fromRepositoryName(
+      this, 
+      'ClaudeVoiceAssistantRepo',
+      'claude-voice-assistant'
+    );
 
     // シークレットの作成
     const appSecrets = new secretsmanager.Secret(this, 'AppSecrets', {
