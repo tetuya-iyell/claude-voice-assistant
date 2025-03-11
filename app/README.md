@@ -5,19 +5,21 @@
 ## 機能
 
 - ブラウザでのマイク録音による音声入力
-- OpenAI Whisper APIを使用した音声認識
+- AWS Transcribeを使用した音声認識
 - Claude APIを利用した自然言語処理
 - Google Text-to-Speechを利用した音声合成
 - 会話履歴の保持
-- AWS S3との統合（オプション）
+- AWS S3との統合（必須）
 
 ## 前提条件
 
 - Node.js (バージョン18以上)
 - 各種APIキー:
   - Anthropic API Key (Claude)
-  - OpenAI API Key (Whisper)
   - Google Cloud キー（音声合成用）
+- AWS設定:
+  - S3バケットアクセス（必須）
+  - Transcribeサービス利用権限
 
 ## ローカル開発
 
@@ -40,14 +42,35 @@
 
 4. ブラウザで `http://localhost:3000` にアクセス
 
+## AWS Transcribeについて
+
+音声認識にはAWS Transcribeを使用しています。AWS Transcribeは非同期APIのため、以下の点に注意してください：
+
+1. **S3バケットが必須**: 
+   - AWS Transcribeは音声ファイルをS3から読み取り、結果もS3に保存します
+   - S3_BUCKET_NAME環境変数が必須です
+
+2. **処理時間**:
+   - 短い音声ファイルでも数秒の処理時間がかかります
+   - アプリケーションはジョブが完了するまで待機します
+
+3. **サポート言語**:
+   - デフォルトでは日本語（ja-JP）に設定されています
+   - 他の言語を使用する場合は、`server.js`の`StartTranscriptionJobCommand`設定を変更してください
+
+4. **ファイル形式**:
+   - サポートされるファイル形式: WAV, MP3, MP4, FLAC, AMR, OGG, WebMなど
+   - 詳細はAWS Transcribe公式ドキュメントを参照してください
+
 ## コンテナビルド
 
 ```bash
 docker build -t claude-voice-assistant .
 docker run -p 3000:3000 \
   -e ANTHROPIC_API_KEY=your_api_key \
-  -e OPENAI_API_KEY=your_api_key \
   -e GOOGLE_APPLICATION_CREDENTIALS_JSON='{"type":"service_account",...}' \
+  -e S3_BUCKET_NAME=your-bucket-name \
+  -e AWS_REGION=us-east-1 \
   claude-voice-assistant
 ```
 
@@ -83,8 +106,7 @@ aws secretsmanager update-secret \
   --secret-id "claude-voice-assistant-secrets" \
   --secret-string '{
     "ANTHROPIC_API_KEY": "sk-ant-your-anthropic-api-key",
-    "OPENAI_API_KEY": "sk-your-openai-api-key",
-    "GOOGLE_APPLICATION_CREDENTIALS_JSON": "{\"type\":\"service_account\",\"project_id\":\"your-project-id\",\"private_key_id\":\"key-id\",\"private_key\":\"-----BEGIN PRIVATE KEY-----\\nYOUR_PRIVATE_KEY\\n-----END PRIVATE KEY-----\\n\",\"client_email\":\"your-service-account@your-project.iam.gserviceaccount.com\",\"client_id\":\"client-id\",\"auth_uri\":\"https://accounts.google.com/o/oauth2/auth\",\"token_uri\":\"https://oauth2.googleapis.com/token\",\"auth_provider_x509_cert_url\":\"https://www.googleapis.com/oauth2/v1/certs\",\"client_x509_cert_url\":\"https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com\",\"universe_domain\":\"googleapis.com\"}"
+    "GOOGLE_APPLICATION_CREDENTIALS_JSON": "{\"type\":\"service_account\",\"project_id\":\"your-project-id\",\"private_key\":\"-----BEGIN PRIVATE KEY-----\\nYOUR_PRIVATE_KEY\\n-----END PRIVATE KEY-----\\n\",\"client_email\":\"your-service-account@your-project.iam.gserviceaccount.com\",\"client_id\":\"client-id\",\"auth_uri\":\"https://accounts.google.com/o/oauth2/auth\",\"token_uri\":\"https://oauth2.googleapis.com/token\",\"auth_provider_x509_cert_url\":\"https://www.googleapis.com/oauth2/v1/certs\",\"client_x509_cert_url\":\"https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com\",\"universe_domain\":\"googleapis.com\"}"
   }'
 ```
 
@@ -93,10 +115,9 @@ aws secretsmanager update-secret \
 | 変数名 | 説明 | 必須 |
 |-------|------|------|
 | `ANTHROPIC_API_KEY` | Anthropic Claude APIのAPIキー | はい |
-| `OPENAI_API_KEY` | OpenAI APIのAPIキー（音声認識用） | はい |
 | `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Google Cloud JSONキー（音声合成用） | はい |
-| `S3_BUCKET_NAME` | 一時ファイル保存用のS3バケット名 | いいえ |
-| `AWS_REGION` | AWSリージョン（S3使用時） | いいえ |
+| `S3_BUCKET_NAME` | AWS Transcribeと一時ファイル保存用のS3バケット名 | はい |
+| `AWS_REGION` | AWSリージョン | はい(デフォルト: us-east-1) |
 | `PORT` | アプリケーションのポート番号 | いいえ(デフォルト: 3000) |
 
 ## ファイル構造
@@ -121,10 +142,15 @@ app/
 - ブラウザでマイクへのアクセス許可が必要です
 - HTTPSまたはlocalhost環境でのみ動作します
 
-### 音声認識の問題
+### AWS Transcribeの問題
 
-- 環境雑音が多い場合、認識精度が低下することがあります
-- OpenAI APIキーが有効であることを確認してください
+- S3バケットが設定されていない場合、音声認識は機能しません
+- 処理に時間がかかる場合は、AWS Transcribeジョブのステータスを確認してください:
+  ```bash
+  aws transcribe get-transcription-job --transcription-job-name [JOB_NAME]
+  ```
+- S3バケットへのアクセス権限が正しく設定されているか確認してください
+- サポートされているファイル形式であることを確認してください
 
 ### 音声合成の問題
 
