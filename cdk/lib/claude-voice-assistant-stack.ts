@@ -111,9 +111,18 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
     // タスクロールにTranscribeポリシーを追加
     taskDefinition.taskRole.addToPrincipalPolicy(transcribePolicy);
 
-    // コンテナイメージをローカルのDockerfileからビルドし、ECRにプッシュ
-    // ディレクトリ構造に注意: CDKディレクトリ(cdk/)の一つ上の階層にappディレクトリがあること
-    const containerImage = ecs.ContainerImage.fromAsset(path.join(__dirname, '../../app'));
+    // コンテナイメージをローカルのDockerfileからビルドするための設定
+    const containerImage = ecs.ContainerImage.fromAsset(path.join(__dirname, '../../app'), {
+      // 小さなイメージサイズと互換性の高い設定
+      platform: cdk.aws_ecr_assets.Platform.LINUX_AMD64,
+      buildArgs: {
+        NODE_ENV: 'production',
+      },
+      // ビルドキャッシュを無効化
+      invalidation: {
+        buildArgs: true,
+      },
+    });
 
     // コンテナ定義
     const container = taskDefinition.addContainer('ClaudeVoiceAssistantContainer', {
