@@ -7,6 +7,9 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager'; // ACMをインポート
+import * as route53 from 'aws-cdk-lib/aws-route53'; // Route53をインポート (必要な場合)
+import * as targets from 'aws-cdk-lib/aws-route53-targets'; // Route53ターゲットをインポート (必要な場合)
 import * as path from 'path';
 import { Construct } from 'constructs';
 
@@ -19,6 +22,13 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       type: 'String',
       description: 'The URI of the container image to deploy',
       default: `${this.account}.dkr.ecr.${this.region}.amazonaws.com/claude-voice-assistant:latest`
+    });
+
+    // ドメイン名パラメータ (オプション)
+    const domainNameParam = new cdk.CfnParameter(this, 'DomainName', {
+      type: 'String',
+      description: 'Domain name for the application (optional)',
+      default: '',
     });
 
     // VPC作成
@@ -158,6 +168,13 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       'Allow HTTP traffic'
     );
 
+    // HTTPS用にポート443も開ける
+    securityGroup.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'Allow HTTPS traffic'
+    );
+
     // Application Load Balancer
     const lb = new elbv2.ApplicationLoadBalancer(this, 'ClaudeVoiceAssistantLB', {
       vpc,
@@ -165,8 +182,39 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       securityGroup: securityGroup,
     });
 
-    const listener = lb.addListener('HttpListener', {
+    // ACM証明書の作成
+    let certificate;
+    const domainName = domainNameParam.valueAsString;
+    
+    if (domainName && domainName !== '') {
+      // カスタムドメインが指定されている場合はそのドメインで証明書を作成
+      certificate = new acm.Certificate(this, 'Certificate', {
+        domainName: domainName,
+        validation: acm.CertificateValidation.fromDns(),
+      });
+    } else {
+      // ドメインが指定されていない場合はロードバランサーのDNS名で自己署名証明書を作成
+      certificate = new acm.Certificate(this, 'SelfSignedCertificate', {
+        domainName: `${lb.loadBalancerDnsName}`,
+        validation: acm.CertificateValidation.fromDns(),
+      });
+    }
+
+    // HTTPリスナー - HTTPSへリダイレクト
+    const httpListener = lb.addListener('HttpListener', {
       port: 80,
+      open: true,
+      defaultAction: elbv2.ListenerAction.redirect({
+        port: '443',
+        protocol: elbv2.ApplicationProtocol.HTTPS,
+        permanent: true,
+      }),
+    });
+
+    // HTTPSリスナー
+    const httpsListener = lb.addListener('HttpsListener', {
+      port: 443,
+      certificates: [certificate],
       open: true,
     });
 
@@ -180,9 +228,8 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       healthCheckGracePeriod: cdk.Duration.seconds(180), // ヘルスチェックの猶予期間を長く設定
     });
 
-    // ロードバランサーのターゲットとしてサービスを追加
-    // プロトコルを明示的に指定
-    listener.addTargets('ClaudeVoiceAssistantTarget', {
+    // HTTPSリスナーにターゲットを追加
+    httpsListener.addTargets('ClaudeVoiceAssistantTarget', {
       port: 3000,
       protocol: elbv2.ApplicationProtocol.HTTP,
       targets: [service],
@@ -212,6 +259,11 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       description: 'The DNS name of the load balancer',
     });
 
+    new cdk.CfnOutput(this, 'LoadBalancerUrl', {
+      value: `https://${lb.loadBalancerDnsName}`,
+      description: 'The URL of the application (HTTPS)',
+    });
+
     new cdk.CfnOutput(this, 'EcrRepositoryUri', {
       value: repository.repositoryUri,
       description: 'The URI of the ECR repository',
@@ -221,5 +273,12 @@ export class ClaudeVoiceAssistantStack extends cdk.Stack {
       value: tempFilesBucket.bucketName,
       description: 'The name of the S3 bucket for temp files',
     });
+
+    if (domainName && domainName !== '') {
+      new cdk.CfnOutput(this, 'CustomDomainUrl', {
+        value: `https://${domainName}`,
+        description: 'The custom domain URL of the application',
+      });
+    }
   }
 }
