@@ -4,29 +4,305 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Claude Voice Assistant</title>
-    <link rel="stylesheet" href="styles.css">
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f7;
+            color: #333;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+        }
+        .chat-container {
+            background-color: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+            margin-bottom: 20px;
+            min-height: 300px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 18px;
+            max-width: 75%;
+            line-height: 1.4;
+        }
+        .user-message {
+            background-color: #e1f5fe;
+            margin-left: auto;
+            border-bottom-right-radius: 4px;
+        }
+        .assistant-message {
+            background-color: #f1f1f1;
+            margin-right: auto;
+            border-bottom-left-radius: 4px;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .button-row {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+        button {
+            background-color: #0071e3;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #0058b3;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        button.recording {
+            background-color: #ff3b30;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+        .status {
+            text-align: center;
+            margin-top: 10px;
+            font-style: italic;
+            color: #666;
+            height: 20px;
+        }
+        .error {
+            color: #ff3b30;
+            text-align: center;
+            margin-top: 10px;
+        }
+    </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>Claude Voice Assistant</h1>
-            <p>マイクボタンをクリックして話しかけてください</p>
-        </header>
-        
-        <div class="chat-container" id="chat-container">
-            <div class="message assistant">
-                <div class="message-content">こんにちは！何かお手伝いできることはありますか？</div>
-            </div>
-        </div>
-        
-        <div class="controls">
-            <div class="status" id="status">準備完了</div>
-            <button id="mic-button" class="mic-button">
-                <span class="mic-icon">🎤</span>
-            </button>
-        </div>
+    <h1>Claude Voice Assistant</h1>
+    
+    <div class="chat-container" id="chat-container">
+        <!-- メッセージが表示される場所 -->
     </div>
     
-    <script src="app.js"></script>
+    <div class="controls">
+        <div class="button-row">
+            <button id="mic-button">マイクボタンをクリックして話しかけてください</button>
+        </div>
+        <div class="status" id="status"></div>
+        <div class="error" id="error"></div>
+    </div>
+
+    <script>
+        // DOM要素
+        const chatContainer = document.getElementById('chat-container');
+        const micButton = document.getElementById('mic-button');
+        const statusEl = document.getElementById('status');
+        const errorEl = document.getElementById('error');
+        
+        // 状態変数
+        let isRecording = false;
+        let recognition;
+        let conversationId = null;
+        let audioContext;
+        let audioElement = new Audio();
+        
+        // Web Speech API対応チェック
+        function checkBrowserSupport() {
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                showError("お使いのブラウザは音声認識に対応していません。Chrome、Edge、またはSafariをお使いください。");
+                micButton.disabled = true;
+                return false;
+            }
+            return true;
+        }
+        
+        // 音声認識の初期化
+        function initSpeechRecognition() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'ja-JP';
+            recognition.continuous = false;
+            recognition.interimResults = false;
+            
+            recognition.onstart = () => {
+                isRecording = true;
+                micButton.textContent = "録音中... クリックで停止";
+                micButton.classList.add('recording');
+                statusEl.textContent = "聞いています...";
+                errorEl.textContent = "";
+            };
+            
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                if (transcript.trim()) {
+                    addMessage(transcript, 'user');
+                    sendMessageToServer(transcript);
+                }
+            };
+            
+            recognition.onerror = (event) => {
+                showError(`音声認識エラー: ${event.error}`);
+                stopRecording();
+            };
+            
+            recognition.onend = () => {
+                stopRecording();
+            };
+        }
+        
+        // 録音の停止
+        function stopRecording() {
+            if (isRecording) {
+                recognition.stop();
+                isRecording = false;
+                micButton.textContent = "マイクボタンをクリックして話しかけてください";
+                micButton.classList.remove('recording');
+                statusEl.textContent = "";
+            }
+        }
+        
+        // マイクボタンのクリックハンドラ
+        micButton.addEventListener('click', () => {
+            if (!checkBrowserSupport()) return;
+            
+            if (!recognition) {
+                initSpeechRecognition();
+            }
+            
+            if (isRecording) {
+                stopRecording();
+            } else {
+                try {
+                    recognition.start();
+                } catch (error) {
+                    showError(`録音開始エラー: ${error.message}`);
+                }
+            }
+        });
+        
+        // メッセージをチャットコンテナに追加
+        function addMessage(text, sender) {
+            const messageEl = document.createElement('div');
+            messageEl.classList.add('message');
+            messageEl.classList.add(sender === 'user' ? 'user-message' : 'assistant-message');
+            messageEl.textContent = text;
+            chatContainer.appendChild(messageEl);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        
+        // エラーメッセージの表示
+        function showError(message) {
+            errorEl.textContent = message;
+            console.error(message);
+        }
+        
+        // ステータスメッセージの表示
+        function showStatus(message) {
+            statusEl.textContent = message;
+        }
+        
+        // サーバーにメッセージを送信
+        async function sendMessageToServer(message) {
+            try {
+                showStatus("Claudeに問い合わせ中...");
+                
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        message,
+                        conversationId
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'サーバーエラーが発生しました');
+                }
+                
+                const data = await response.json();
+                conversationId = data.conversationId;
+                
+                // レスポンスメッセージを表示
+                addMessage(data.text, 'assistant');
+                
+                // 音声で応答を再生
+                await speakResponse(data.text);
+                
+            } catch (error) {
+                showError(`エラー: ${error.message}`);
+            } finally {
+                showStatus("");
+            }
+        }
+        
+        // テキストを音声で読み上げ
+        async function speakResponse(text) {
+            try {
+                showStatus("応答を音声変換中...");
+                
+                // サーバーに音声合成をリクエスト
+                const response = await fetch('/api/speech', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ text })
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || '音声合成エラーが発生しました');
+                }
+                
+                const data = await response.json();
+                
+                // オーディオを再生
+                showStatus("音声を再生中...");
+                audioElement.src = data.url;
+                
+                await new Promise((resolve, reject) => {
+                    audioElement.onended = resolve;
+                    audioElement.onerror = reject;
+                    audioElement.play();
+                });
+                
+            } catch (error) {
+                showError(`音声合成エラー: ${error.message}`);
+            } finally {
+                showStatus("");
+            }
+        }
+        
+        // アプリ初期化
+        function initApp() {
+            checkBrowserSupport();
+            // 初期メッセージ
+            addMessage("こんにちは！何かお手伝いできることはありますか？", 'assistant');
+        }
+        
+        // アプリ初期化
+        window.addEventListener('DOMContentLoaded', initApp);
+    </script>
 </body>
 </html>
